@@ -17,3 +17,7 @@ adamjo@ohsu.edu
 - ndr ; number of distinct word roots calculated across the transcript.
 - mlum ; mean length of utterance in morphemes calculated across the transcript.
 - v0 - v299 ; vectorized representation of subject transcript.
+
+# Additional Metadata
+
+For access to additional subject metadata (Age, IQ, Diagnosis), please contact adamjo@ohsu.edu or fombonne@ohsu.edu
