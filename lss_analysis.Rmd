@@ -1,0 +1,305 @@
+---
+title: "LSS Analysis"
+author: "joel adams"
+date: "2/8/2019"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+# Part 1: Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Requirements:
+```{r eval = FALSE}
+install.packages("beeswarm")
+install.packages("lmtest")
+install.packages("sandwich")
+install.packages("maxLik")
+install.packages("nloptr")
+install.packages("HH")
+install.packages("dplyr")
+install.packages("ggplot2")
+install.packages("splines")
+install.packages("geepack")
+```
+
+```{r}
+require(beeswarm)
+require(lmtest)
+require(sandwich)
+require(maxLik)
+require(nloptr)
+require(dplyr)
+require(car)
+require(ggplot2)
+require(splines)
+library(geepack)
+```
+
+
+
+## Load Data
+
+```{r}
+#setwd("~/devel/language_outcomes/semantic-similarity/analysis")
+DATA <- read.csv("transcript_vectors.csv")
+DATA.META <- read.csv("metadata.csv")
+DATA <- inner_join(DATA, DATA.META)
+
+
+# Need to filter a kid, and do it first.
+DATA <- filter(DATA, sid != "OGI-231")
+
+
+
+DATA$dx2 <- DATA$dx3
+levels(DATA$dx2)
+levels(DATA$dx2)[2] <- levels(DATA$dx2)[3] # combine level 2 (SLI) with level 3 (TD)
+levels(DATA$dx2) <- c("ASD","non-ASD")     # give new label to {TD+SLI} group (not ASD)
+# re-level dx2 so non-ASD is reference
+DATA$dx2 <- relevel(DATA$dx2, ref="non-ASD")
+# re-level others while we're at it
+DATA$dx3 <- relevel(DATA$dx3, ref="TD")
+DATA$dx4 <- relevel(DATA$dx4, ref="TD")
+
+# ordering
+DATA <- DATA[,c(1, 304, 312, 306, 305, 307:311, 2:3, 4:303)]
+
+#Filter out SLI
+DATA <- filter(DATA, dx4 != 'SLI' )
+
+DATA <- DATA[order(DATA$dx2,DATA$dx4,DATA$age,DATA$nviq),]
+rownames(DATA) <- NULL
+
+
+ok <- grep("v[0-9]+", names(DATA) )
+
+X <- data.matrix(DATA[,ok]) ; rm(ok)
+
+#
+# X is 80 (subjects) x 300 (features)
+#
+# apply(X,1,function(x) sum(x*x) )
+#
+#  Above yields all 1, implying each subject's 300-tuple
+#  is already scaled to unit length.
+#
+
+xtx <- X%*%t(X)  # 80x80 matrix giving cosine of angle between pairs
+                 # of subjects w.r.t. 300-tuple of entries.
+                 # xtx  might be called a cosine-correlation matrix
+                 # 1-xtx could be treated as a proximity matrix
+```
+
+
+
+
+
+
+## Some Exploratory Statistics
+
+
+
+```{r}
+
+
+
+kol <- c('#1b9e77','#d95f02') # green, rust
+kol <- rep(kol, as.vector(table(DATA$dx2)) ) # non-ASD (green) ; ASD (rust)
+#
+#    > table(kol, DATA$dx2)
+#
+#    kol       non-ASD ASD
+#      #1b9e77      42   0
+#      #d95f02       0  38
+#
+
+u <- xtx - diag(diag(xtx)) # throw 0 onto main diagonal
+
+# Use the atanh( r ) function to convert r (a correlation) to
+# something less skewed. This is the Fisher z-transformation
+# where atanh( r ) := 5e-1*log[ (1+r)/(1-r) ]
+#
+# atanh(0)=0, which is why zero needed along main diag.
+#             (we actually exclude main diag., but prevents
+#              atanh(1)=Inf during computation anyway.)
+#
+### ALL
+hist( atanh(u)[lower.tri(u,diag=F)], main="All",
+      xlab="atanh(x*x')", probability=T, col='gray80',
+      ylim=c(0,2), las=1 )
+box(bty="l")
+abline(h=0)
+lines(density(atanh(u)[lower.tri(u,diag=F)], bw="SJ-dpi"),
+      lwd=2 )
+
+
+### Non-ASD
+ok <- DATA$dx2=="non-ASD"
+u <- X[ok,]%*%t(X[ok,]) ; u <- u - diag(diag(u)) ;
+hist( atanh(u)[lower.tri(u,diag=F)], main="non-ASD",
+      xlab="atanh(x*x')", probability=T, col='gray80',
+      ylim=c(0,2.5), las=1 )
+box(bty="l")
+abline(h=0)
+lines(density(atanh(u)[lower.tri(u,diag=F)], bw="SJ-dpi"),
+      lwd=2 )
+
+
+### ASD
+ok <- DATA$dx2=="ASD"
+u <- X[ok,]%*%t(X[ok,]) ; u <- u - diag(diag(u)) ;
+hist( atanh(u)[lower.tri(u,diag=F)], main="ASD",
+      xlab="atanh(x*x')", probability=T, col='gray80',
+      ylim=c(0,1.5), las=1 )
+box(bty="l")
+abline(h=0)
+lines(density(atanh(u)[lower.tri(u,diag=F)], bw="SJ-dpi"),
+      lwd=2 )
+```
+
+
+
+
+
+## Construct PVs
+
+
+```{r}
+
+####
+# Go back to full 80x80 (Note, now 79x79 -ja) cosine-correlation matrix
+# to construct pseudo-values
+#
+#
+
+u <- X%*%t(X)  ; u <- u - diag(diag(u))      # zeros on main diag.
+(th <- mean(atanh(u)[lower.tri(u,diag=F)]) ) # average of atanh(.) transformed lower-triangular
+n <- nrow(X); pv <- numeric(n)               # initialize pseudo-value vector (80-tuple)
+atu <- atanh(u)                              # transform cosine-correlations
+
+for(i in 1:n){
+    tmp <- atu[-i,-i]
+    pv[i] <- n*th - (n-1)*mean(tmp[lower.tri(tmp,diag=F)])
+}
+mean(pv)
+
+# post-process and tidy up
+ok <- 1 ; ok <- !is.na(match(ls(), c("DATA","X","pv","kol") ) ) #list things to keep
+#remove(list=ls()[!ok])
+
+DATA$pv <- pv ; rm(pv)
+
+```
+
+
+
+## Data for plotting.
+
+```{r}
+#at this point, this just gives us age in years.
+
+participants <- DATA
+participants$age.years <- participants$age / 12
+```
+
+
+Data by diagnosis
+
+```{r}
+
+
+select(participants, dx2, nviq, viq, mlum, ndr, age.years, fsiq) %>%
+  group_by(dx2) %>%
+  summarise(cnt=n(),mean_fsiq=mean(fsiq), sd_fsiq=sd(fsiq), mean_nviq=mean(nviq), sd_nviq=sd(nviq), mean_viq=mean(viq), sd_viq=sd(viq), mean_mlum=mean(mlum),sd_mlum=sd(mlum), min_mlum=min(mlum), mean_ndr=mean(ndr), sd_ndr=sd(ndr), mean_age=mean(age.years), min_age=min(age.years), max_age=max(age.years), sd_age=sd(age.years))
+
+
+participants.ttesting <- select(participants, dx2, nviq, viq, mlum, ndr, age.years, fsiq)
+participants.td <- filter(participants.ttesting, dx2=="non-ASD")
+participants.asd <- filter(participants.ttesting, dx2=='ASD')
+
+t.test(participants.td$age.years, participants.asd$age.years)
+t.test(participants.td$fsiq, participants.asd$fsiq)
+t.test(participants.td$nviq, participants.asd$nviq)
+t.test(participants.td$viq, participants.asd$viq)
+t.test(participants.td$mlum, participants.asd$mlum)
+t.test(participants.td$ndr, participants.asd$ndr)
+
+```
+
+
+
+## Distribution of PVs
+
+```{r}
+####
+#  Exploratory graphs
+#
+
+kol2 <- c('#1b9e77','#d95f02') # green, rust
+
+
+boxplot(pv ~ dx2, data=DATA, col=kol2, las=1,
+        ylab="Pseudo-value of atanh(x*x')",
+        outpch=NA, whisklty=1, boxwex=0.40)
+
+points(1:2, tapply(DATA$pv, DATA$dx2, mean), pch=16, col="white", cex=1.2)
+
+beeswarm(pv ~ dx2, data=DATA, method="center", pch=16, cex=0.80,
+         add=T, at=c(1:2)+0.3, col=kol2 )
+
+wilcox.test( pv ~ dx2, data=DATA, conf.int=T)
+
+
+```
+
+
+
+
+## Regression Model
+
+
+
+
+```{r}
+#fit.selective <- lm(pv~dx2+age+viq+nviq+mlum+ndr+dx2:ndr, data=participants)
+fit.omnibus <- lm(pv~dx2+age+viq+nviq+mlum+ndr+
+                    dx2:viq+dx2:nviq+dx2:mlum+dx2:ndr, data=participants)
+summary(fit.omnibus)
+
+
+fit.selective <- lm(pv~dx2+age+viq+nviq+mlum+ndr+dx2:ndr, data=participants)
+summary(fit.selective)
+#Final Coefficients:
+
+# (Intercept)  1.2429503  0.4490603   2.768  0.00743 **
+# dx2ASD      -0.6929985  0.3116527  -2.224  0.02983 * 
+# age          0.0002247  0.0027292   0.082  0.93466   
+# viq          0.0044996  0.0025461   1.767  0.08210 . 
+# nviq         0.0005997  0.0023594   0.254  0.80022   
+# mlum        -0.0007804  0.0573827  -0.014  0.98919   
+# ndr          0.0006671  0.0006854   0.973  0.33422   
+# dx2ASD:ndr   0.0012480  0.0006653   1.876  0.06538 . 
+
+#coeftest(fit.selective, df = Inf, vcov = vcovHC)
+```
+
+#Plot the NDR relationships.
+
+```{r}
+
+
+ggplot(data = participants, aes(x = ndr, y = pv, colour=dx3)) +
+  geom_point()  + geom_smooth(method=lm) + facet_wrap(~dx3)
+
+
+
+```
+
+
+
